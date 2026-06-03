@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='otatool_v1',
+    name='OTADeployTool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['logo.icns'],
 )
 coll = COLLECT(
     exe,
@@ -40,11 +41,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='otatool_v1',
+    name='OTADeployTool',
 )
 app = BUNDLE(
     coll,
-    name='otatool_v1.app',
-    icon=None,
+    name='OTADeployTool.app',
+    icon='logo.icns',
     bundle_identifier=None,
 )

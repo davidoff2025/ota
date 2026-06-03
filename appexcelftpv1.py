@@ -1555,7 +1555,8 @@ class OTATemplateApp:
                 worker.start()
             else:
                 self.stop_animation("模版生成成功")
-                self.show_center_message("生成完成", f"Excel 文件生成成功。\n\n输出文件：\n{output_path}")
+                self.log_message(f"生成完成，Excel 文件已输出到：{output_path}")
+                self.show_center_message("生成完成", "生成完成")
 
         except Exception as e:
             self.stop_animation("生成失败")
