@@ -6,7 +6,7 @@ import threading
 import traceback
 import subprocess
 import shutil
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from datetime import datetime
 from ftplib import FTP
 
@@ -54,15 +54,16 @@ COLUMN_ALIASES = {
         "机器扩展码", "扩展码", "扩展信息", "机器扩展信息", "设备扩展信息",
         "extension info", "extension code", "feature code",
     ],
-    "OTA类型": ["OTA类型", "ota type", "升级类型"],
+    "OTA类型": ["OTA类型", "OTA升级类型", "升级类型", "ota type", "upgrade type"],
     "源版本": ["源版本", "source version", "源文件版本"],
     "目标版本": ["目标版本", "target version", "完整版本", "目标文件版本"],
     "版本变化": ["版本变化", "version change", "版本差异"],
-    "升级包地址": ["升级包地址", "升级文件地址", "ftp path", "upgrade url", "file path", "文件路径"],
+    "升级包地址": ["升级包地址", "整包地址", "整包文件地址", "完整包地址", "全包地址", "OTA整包地址", "ZIP地址", "ZIP文件地址", "升级文件地址", "ftp path", "ftp url", "upgrade url", "file path", "文件路径"],
     "升级文件的MD5值": ["升级文件的md5值", "升级文件md5值", "md5", "md5值", "md5 checksum"],
     "文件大小": ["升级包大小", "升级包大小(byte)", "升级包大小（byte）", "文件大小", "升级文件包大小（byte）", "升级文件包大小(byte)", "file size", "size"],
     "语言信息": ["语言信息", "language", "lang", "语言"],
     "品牌": ["品牌", "brand"],
+    "区域": ["区域", "区域组", "地区", "地区组", "region", "area", "country", "market", "territory"],
     "SHA256": ["sha256", "sha256值"],
     "EULA文件地址": ["eula文件地址", "eula", "eula url"],
     "MAC": ["mac", "mac地址", "mac address"],
@@ -355,7 +356,15 @@ class OTATemplateApp:
         self.root.after(400, self.animate_status)
 
     def log_message(self, message):
-        self.log_text.insert(tk.END, str(message) + "\n")
+        """Write a detailed timestamped message into the UI execution log."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        text = str(message)
+        # Keep section dividers visually clean.
+        if not text or set(text.strip()) <= {"="}:
+            line = text
+        else:
+            line = f"[{timestamp}] {text}"
+        self.log_text.insert(tk.END, line + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
 
@@ -505,7 +514,7 @@ class OTATemplateApp:
         for col_idx in range(1, ws.max_column + 1):
             col_scores = {
                 "机型信息": 0, "机器扩展码": 0, "OTA类型": 0, "源版本": 0, "目标版本": 0,
-                "版本变化": 0, "升级包地址": 0, "升级文件的MD5值": 0, "文件大小": 0, "品牌": 0, "MAC": 0,
+                "版本变化": 0, "升级包地址": 0, "升级文件的MD5值": 0, "文件大小": 0, "品牌": 0, "区域": 0, "MAC": 0,
             }
             for row_idx in range(1, min(ws.max_row, 30) + 1):
                 text = str(ws.cell(row=row_idx, column=col_idx).value or "").strip()
@@ -532,13 +541,15 @@ class OTATemplateApp:
                     col_scores["文件大小"] += 4
                 if text.lower() in ["hisense", "toshiba", "vidaa"]:
                     col_scores["品牌"] += 5
+                if text.upper() in ["US", "USA", "EU", "UK", "CA", "AU", "APAC", "LATAM", "MENA", "GLOBAL"] or text.lower() in ["north america", "europe", "global"]:
+                    col_scores["区域"] += 4
                 if ("、" in text or "," in text) and re.search(r"[a-fA-F0-9]{8}", text):
                     col_scores["MAC"] += 3
             scores[col_idx] = col_scores
 
         mapping = {}
         used_cols = set()
-        field_priority = ["升级包地址", "升级文件的MD5值", "文件大小", "OTA类型", "版本变化", "品牌", "MAC", "机型信息", "机器扩展码"]
+        field_priority = ["升级包地址", "升级文件的MD5值", "文件大小", "OTA类型", "版本变化", "品牌", "区域", "MAC", "机型信息", "机器扩展码"]
         for field in field_priority:
             best_col = None
             best_score = 0
@@ -573,7 +584,13 @@ class OTATemplateApp:
     def read_source_excel(self, file_path, use_gui_log=True):
         if use_gui_log:
             self.log_message("正在读取 Excel...")
+            self.log_message(f"Source Excel 路径：{file_path}")
+            self.log_message(f"文件大小：{os.path.getsize(file_path)} bytes")
         self.source_wb = load_workbook(file_path, data_only=False)
+        if use_gui_log:
+            self.log_message("Excel 工作簿打开成功。")
+            self.log_message(f"工作表数量：{len(self.source_wb.worksheets)}")
+            self.log_message("工作表列表：" + ", ".join([ws.title for ws in self.source_wb.worksheets]))
 
         best_ws = None
         best_header_row = None
@@ -586,8 +603,11 @@ class OTATemplateApp:
             no_header_row, no_header_mapping, no_header_score = self.detect_columns_without_header(ws)
             if use_gui_log:
                 self.log_message(f"检测工作表：{ws.title}")
+                self.log_message(f"  尺寸：{ws.max_row} 行 x {ws.max_column} 列")
                 self.log_message(f"  表头识别字段数量：{score}")
+                self.log_message(f"  表头模式字段映射：{self.format_mapping_for_log(mapping)}")
                 self.log_message(f"  无表头识别字段数量：{no_header_score}")
+                self.log_message(f"  无表头模式字段映射：{self.format_mapping_for_log(no_header_mapping)}")
             if no_header_score > score:
                 current_score = no_header_score
                 current_mapping = no_header_mapping
@@ -621,22 +641,37 @@ class OTATemplateApp:
             self.log_message("字段映射结果：")
             for field, col_idx in best_mapping.items():
                 self.log_message(f"  {field} -> {get_column_letter(col_idx)}列 / 示例值：{best_ws.cell(start_row, col_idx).value}")
+            self.log_required_field_status(best_mapping)
 
         data_rows = []
         for row_idx in range(start_row, best_ws.max_row + 1):
             row_data = {}
             has_any_value = False
+
+            # Keep a copy of the whole original Excel row.
+            # This is important because some customer source files use changing
+            # header names for the FTP ZIP URL column, for example 整包地址 / 整包文件 / 升级包地址.
+            # Even if the normal field mapping misses that column, generation can still
+            # scan this row and extract the exact .zip filename.
+            all_cell_values = []
+            for col_idx in range(1, best_ws.max_column + 1):
+                raw_value = best_ws.cell(row=row_idx, column=col_idx).value
+                if raw_value not in (None, ""):
+                    has_any_value = True
+                    all_cell_values.append(str(raw_value).strip())
+
             for field, col_idx in best_mapping.items():
                 value = best_ws.cell(row=row_idx, column=col_idx).value
-                if value not in (None, ""):
-                    has_any_value = True
                 row_data[field] = "" if value is None else str(value).strip()
+
             if has_any_value:
                 row_data["_row_number"] = row_idx
+                row_data["_all_cell_values"] = all_cell_values
                 data_rows.append(row_data)
 
         if use_gui_log:
             self.log_message(f"读取到的数据行数：{len(data_rows)}")
+            self.log_message("Excel 读取完成。")
         return data_rows, best_mapping
 
     # ==========================================================
@@ -644,21 +679,74 @@ class OTATemplateApp:
     # ==========================================================
 
     def get_unique_ftp_urls(self, rows):
+        """Return unique FTP ZIP URLs from parsed source rows.
+
+        This keeps compatibility with the normal column mapping path.
+        The source Excel may call this field 整包地址 / 升级包地址 / 升级文件地址.
+        """
         ftp_urls = []
         for row in rows:
             url = self.get_value(row, "升级包地址")
-            if url and str(url).lower().startswith("ftp://"):
-                ftp_urls.append(url.strip())
+            if url and str(url).strip().lower().startswith("ftp://") and ".zip" in str(url).lower():
+                ftp_urls.append(str(url).strip())
         return list(dict.fromkeys(ftp_urls))
 
+    def scan_ftp_zip_urls_from_excel(self, source_file_path):
+        """Scan the whole workbook for FTP .zip URLs.
+
+        This is intentionally independent from header detection.  Some source
+        files use different column names such as 整包地址, and the safest
+        behavior for the download step is to scan every cell and extract any
+        ftp://...zip value.
+        """
+        self.thread_log("开始扫描 Source Excel 中所有单元格，查找 FTP ZIP 地址...")
+        self.thread_log(f"扫描文件：{source_file_path}")
+        wb = load_workbook(source_file_path, data_only=True, read_only=True)
+        urls = []
+        for ws in wb.worksheets:
+            self.thread_log(f"扫描工作表：{ws.title}，尺寸：{ws.max_row} 行 x {ws.max_column} 列")
+            for row in ws.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if value is None:
+                        continue
+                    text = str(value).strip()
+                    if text.lower().startswith("ftp://") and ".zip" in text.lower():
+                        urls.append(text)
+                        self.thread_log(f"发现 FTP ZIP 地址：工作表={ws.title}, 单元格={cell.coordinate}")
+                        self.thread_log(f"  原始地址：{text}")
+        wb.close()
+        unique_urls = list(dict.fromkeys(urls))
+        self.thread_log(f"扫描完成：发现 FTP ZIP 地址 {len(urls)} 条，去重后 {len(unique_urls)} 个文件。")
+        return unique_urls
+
     def parse_ftp_url(self, ftp_url):
-        parsed = urlparse(ftp_url)
+        """Parse FTP URL from source Excel.
+
+        Excel usually stores URLs such as:
+        ftp://ftpuser@10.18.203.204/upload/.../32S60S%289A%29_User/.../USBOTA_xxx.zip
+
+        Important: urlparse keeps the path percent-encoded.  FTP servers store
+        the real directory name with characters such as parentheses, not with
+        literal %28/%29.  Therefore we must unquote the path before cwd/RETR.
+        Otherwise ftp.cwd('/upload/.../32S60S%289A%29_User/...') returns:
+        ftplib.error_perm: 550 Failed to change directory.
+        """
+        raw_url = str(ftp_url).strip()
+        parsed = urlparse(raw_url)
         host = parsed.hostname
-        remote_path = parsed.path
+        encoded_remote_path = parsed.path or ""
+        remote_path = unquote(encoded_remote_path)
+        url_user = unquote(parsed.username or "")
         if not host or not remote_path:
             raise ValueError(f"无效 FTP 地址：{ftp_url}")
         filename = os.path.basename(remote_path)
-        return host, remote_path, filename
+        remote_dir = os.path.dirname(remote_path) or "/"
+        encoded_filename = os.path.basename(encoded_remote_path)
+        encoded_remote_dir = os.path.dirname(encoded_remote_path) or "/"
+        if not filename.lower().endswith(".zip"):
+            raise ValueError(f"FTP 地址不是 .zip 文件：{ftp_url}")
+        return host, remote_dir, filename, remote_path, url_user, encoded_remote_dir, encoded_filename, encoded_remote_path
 
     def create_temp_folder(self, source_file_path):
         temp_folder = os.path.join(os.path.dirname(source_file_path), "temp")
@@ -666,56 +754,152 @@ class OTATemplateApp:
         return temp_folder
 
     def download_ftp_file_binary_threaded(self, ftp_url, temp_folder, file_index, total_files):
-        host, remote_path, filename = self.parse_ftp_url(ftp_url)
+        (
+            host,
+            remote_dir,
+            filename,
+            remote_path,
+            url_user,
+            encoded_remote_dir,
+            encoded_filename,
+            encoded_remote_path,
+        ) = self.parse_ftp_url(ftp_url)
         local_path = os.path.join(temp_folder, filename)
+        login_user = url_user or FTP_USER
+
         self.thread_log("")
         self.thread_log(f"下载任务 {file_index}/{total_files}")
-        self.thread_log(f"准备连接 FTP 服务器：{host}")
-        self.thread_log(f"远程文件：{remote_path}")
+        self.thread_log(f"原始 FTP URL：{ftp_url}")
+        self.thread_log(f"FTP 服务器 IP/Host：{host}")
+        self.thread_log(f"FTP 远程目录（解码后，用于 cwd）：{remote_dir}")
+        self.thread_log(f"FTP 远程目录（URL 原始编码）：{encoded_remote_dir}")
+        self.thread_log(f"ZIP 文件名（解码后）：{filename}")
+        self.thread_log(f"ZIP 文件名（URL 原始编码）：{encoded_filename}")
+        self.thread_log(f"FTP 远程完整路径（解码后）：{remote_path}")
+        self.thread_log(f"FTP 远程完整路径（URL 原始编码）：{encoded_remote_path}")
         self.thread_log(f"本地暂存路径：{local_path}")
+        self.thread_log(f"FTP 登录用户：{login_user}")
+        self.thread_log("FTP 密码：已配置，日志中不打印明文。")
 
-        ftp = FTP(host, timeout=120)
-        ftp.login(FTP_USER, FTP_PASS)
-        self.thread_log("FTP 登录服务器成功。")
-
+        ftp = None
         try:
-            file_size = ftp.size(remote_path)
-        except Exception:
-            file_size = 0
+            self.thread_log("正在建立 FTP 连接，超时时间：120 秒...")
+            ftp = FTP(host, timeout=120)
+            self.thread_log("FTP 连接建立成功，正在登录...")
+            ftp.login(login_user, FTP_PASS)
+            self.thread_log("FTP 登录服务器成功。")
 
-        self.thread_log(f"找到要下载的文件：{filename}")
-        if file_size:
-            self.thread_log(f"文件大小：{file_size} bytes")
-        else:
-            self.thread_log("无法获取文件大小，将显示任务级进度。")
+            try:
+                self.thread_log(f"FTP 登录后的当前目录：{ftp.pwd()}")
+            except Exception:
+                self.thread_log("FTP 当前目录读取失败。")
 
-        downloaded = 0
-        with open(local_path, "wb") as f:
-            def callback(data):
-                nonlocal downloaded
-                f.write(data)
-                downloaded += len(data)
-                if file_size > 0:
-                    file_percent = downloaded / file_size * 100
-                    total_percent = ((file_index - 1) + file_percent / 100) / total_files * 100
-                    self.thread_progress(total_percent, f"正在下载 {filename}：{file_percent:.1f}%")
-            ftp.retrbinary(f"RETR {remote_path}", callback, blocksize=1024 * 128)
+            cwd_success = False
+            cwd_errors = []
+            # Normal FTP path should be decoded.  Keep encoded path only as a
+            # fallback because some non-standard servers may expose literal %xx.
+            for candidate_dir, label in [
+                (remote_dir, "解码后目录"),
+                (encoded_remote_dir, "URL原始编码目录"),
+            ]:
+                if not candidate_dir:
+                    continue
+                try:
+                    self.thread_log(f"正在切换到 FTP 文件目录（{label}）：{candidate_dir}")
+                    ftp.cwd(candidate_dir)
+                    self.thread_log(f"FTP 目录切换成功，当前目录：{ftp.pwd()}")
+                    cwd_success = True
+                    break
+                except Exception as e:
+                    cwd_errors.append(f"{label}={candidate_dir} -> {e}")
+                    self.thread_log(f"FTP 目录切换失败（{label}）：{e}")
 
-        ftp.quit()
-        self.thread_log(f"下载完成：{local_path}")
-        total_percent = file_index / total_files * 100
-        self.thread_progress(total_percent, f"已完成 {file_index}/{total_files} 个文件")
-        return local_path
+            if not cwd_success:
+                self.thread_log("所有 FTP 目录切换方式均失败。失败详情：")
+                for err in cwd_errors:
+                    self.thread_log(f"  {err}")
+                self.thread_log("将尝试使用完整远程路径直接 RETR 下载，避免依赖 cwd。")
+
+            active_retr_name = filename if cwd_success else remote_path
+            active_size_name = filename if cwd_success else remote_path
+
+            try:
+                if cwd_success:
+                    names = ftp.nlst()
+                    self.thread_log(f"当前目录文件数量：{len(names)}")
+                    if filename in names:
+                        self.thread_log("目标 ZIP 文件在当前目录中确认存在。")
+                    else:
+                        self.thread_log("警告：目录列表中未直接看到目标 ZIP 文件，仍将尝试 RETR 下载。")
+                else:
+                    self.thread_log("未进入目标目录，跳过目录列表读取。")
+            except Exception as e:
+                self.thread_log(f"FTP 目录列表读取失败，将继续尝试下载：{e}")
+
+            try:
+                file_size = ftp.size(active_size_name)
+            except Exception:
+                file_size = 0
+
+            self.thread_log(f"准备下载 ZIP 文件：{filename}")
+            self.thread_log(f"FTP RETR 使用路径：{active_retr_name}")
+            if file_size:
+                self.thread_log(f"文件大小：{file_size} bytes")
+            else:
+                self.thread_log("无法获取文件大小，将显示任务级进度。")
+
+            downloaded = 0
+            with open(local_path, "wb") as f:
+                def callback(data):
+                    nonlocal downloaded
+                    f.write(data)
+                    downloaded += len(data)
+                    if file_size > 0:
+                        file_percent = downloaded / file_size * 100
+                        total_percent = ((file_index - 1) + file_percent / 100) / total_files * 100
+                        self.thread_progress(total_percent, f"正在下载 {filename}：{file_percent:.1f}%")
+                ftp.retrbinary(f"RETR {active_retr_name}", callback, blocksize=1024 * 128)
+
+            self.thread_log(f"下载完成：{local_path}")
+            self.thread_log(f"已下载字节数：{downloaded} bytes")
+            total_percent = file_index / total_files * 100
+            self.thread_progress(total_percent, f"已完成 {file_index}/{total_files} 个文件")
+            return local_path
+        finally:
+            if ftp is not None:
+                try:
+                    ftp.quit()
+                    self.thread_log("FTP 连接已关闭。")
+                except Exception:
+                    try:
+                        ftp.close()
+                    except Exception:
+                        pass
+                    self.thread_log("FTP 连接已强制关闭。")
 
     def download_all_ftp_files_worker(self, source_file_path, device_code="", auto_upload=False):
         try:
             self.thread_log("开始后台下载 ZIP 文件...")
+            self.thread_log(f"Source Excel 路径：{source_file_path}")
             self.thread_progress(0, "正在读取 Source Excel...")
-            rows, _ = self.read_source_excel(source_file_path, use_gui_log=False)
-            unique_urls = self.get_unique_ftp_urls(rows)
+
+            # First use normal field mapping; then scan the whole workbook as a fallback.
+            # This guarantees that full FTP URLs in columns such as 整包地址 are found.
+            try:
+                rows, mapping = self.read_source_excel(source_file_path, use_gui_log=False)
+                self.thread_log(f"Excel 字段映射识别结果：{self.format_mapping_for_log(mapping)}")
+                mapped_urls = self.get_unique_ftp_urls(rows)
+                self.thread_log(f"通过字段映射发现 FTP ZIP 文件数量：{len(mapped_urls)}")
+            except Exception as e:
+                mapped_urls = []
+                self.thread_log(f"字段映射读取失败，将继续执行全表扫描：{e}")
+
+            scanned_urls = self.scan_ftp_zip_urls_from_excel(source_file_path)
+            unique_urls = list(dict.fromkeys(mapped_urls + scanned_urls))
+
             self.thread_log("")
             self.thread_log("========== FTP 下载任务 ==========")
-            self.thread_log(f"去重后需要下载的 ZIP 文件数量：{len(unique_urls)}")
+            self.thread_log(f"需要下载的 ZIP 文件总数：{len(unique_urls)}")
 
             if not unique_urls:
                 self.thread_progress(100, "没有发现需要下载的 FTP 文件")
@@ -730,18 +914,29 @@ class OTATemplateApp:
             self.thread_log(f"临时下载目录：{temp_folder}")
 
             downloaded_files = []
+            failed_files = []
             for index, ftp_url in enumerate(unique_urls, start=1):
                 try:
                     local_path = self.download_ftp_file_binary_threaded(ftp_url, temp_folder, index, len(unique_urls))
                     downloaded_files.append(local_path)
+                    self.thread_log(f"下载成功 [{index}/{len(unique_urls)}]：{os.path.basename(local_path)}")
                 except Exception as e:
-                    self.thread_log(f"下载失败：{ftp_url}")
-                    self.thread_log(str(e))
+                    failed_files.append((ftp_url, str(e)))
+                    self.thread_log(f"下载失败 [{index}/{len(unique_urls)}]：{ftp_url}")
+                    self.thread_log(f"失败原因：{e}")
+                    self.thread_log(traceback.format_exc())
 
             self.thread_progress(100, "全部 ZIP 下载任务完成")
             self.thread_log("")
             self.thread_log("========== 下载完成 ==========")
+            self.thread_log(f"需要下载 ZIP 文件总数：{len(unique_urls)}")
             self.thread_log(f"成功下载 ZIP 文件数：{len(downloaded_files)}")
+            self.thread_log(f"失败下载 ZIP 文件数：{len(failed_files)}")
+            if failed_files:
+                self.thread_log("失败文件列表：")
+                for ftp_url, reason in failed_files:
+                    self.thread_log(f"  {ftp_url}")
+                    self.thread_log(f"    {reason}")
 
             if auto_upload and device_code and downloaded_files:
                 temp_folder = self.create_temp_folder(source_file_path)
@@ -762,13 +957,58 @@ class OTATemplateApp:
     # ==========================================================
 
     def map_ota_type(self, value):
-        if value is None or str(value).strip() == "":
+        """Normalize OTA upgrade type from the source Excel.
+
+        Supported source values include:
+        - 1 / 1.0 / 正常升级 / 1-正常升级 / 1 - 正常升级
+        - 2 / 2.0 / 强制升级 / 2-强制升级 / 2 - 强制升级
+        - 11 / 11.0 / FTE强制升级 / 11-FTE强制升级 / 11 - FTE强制升级
+
+        The output template requires numeric codes only: 1, 2, or 11.
+        """
+        if value is None:
             return "1"
-        mapping = {
-            "正常升级": "1", "强制升级": "2", "FTE强制升级": "11", "fte强制升级": "11",
-            "FTE 强制升级": "11", "fte 强制升级": "11", "1": "1", "2": "2", "11": "11",
-        }
-        return mapping.get(str(value).strip(), "1")
+
+        raw = str(value).strip()
+        if raw == "":
+            return "1"
+
+        # Normalize common punctuation and spacing variations from Excel cells.
+        normalized = raw.replace("－", "-").replace("–", "-").replace("—", "-")
+        normalized = normalized.replace("：", ":").replace("，", ",")
+        normalized_no_space = re.sub(r"\s+", "", normalized)
+        lowered = normalized_no_space.lower()
+
+        # Numeric values may come from Excel as 1, 2, 11, 1.0, 2.0, 11.0.
+        numeric_candidate = normalized_no_space
+        if re.fullmatch(r"\d+(?:\.0+)?", numeric_candidate):
+            numeric_code = str(int(float(numeric_candidate)))
+            if numeric_code in ("1", "2", "11"):
+                return numeric_code
+
+        # Compound values like "11-FTE强制升级", "2 - 强制升级", "1:正常升级".
+        prefix_match = re.match(r"^(11|2|1)(?:[-_:：、,，]|$)", normalized_no_space, re.IGNORECASE)
+        if prefix_match:
+            return prefix_match.group(1)
+
+        # Text values. Check FTE before generic 强制, otherwise FTE强制升级 would map to 2.
+        if "fte" in lowered and "强制" in normalized_no_space:
+            return "11"
+        if "强制" in normalized_no_space:
+            return "2"
+        if "正常" in normalized_no_space:
+            return "1"
+
+        # English fallbacks.
+        if "force" in lowered or "mandatory" in lowered:
+            if "fte" in lowered:
+                return "11"
+            return "2"
+        if "normal" in lowered or "regular" in lowered:
+            return "1"
+
+        # Keep previous behavior: default to normal upgrade. Caller logs raw value.
+        return "1"
 
     def extract_zip_filename(self, url_or_path):
         if not url_or_path:
@@ -776,9 +1016,31 @@ class OTATemplateApp:
         text = str(url_or_path).strip()
         match = re.search(r"([^/\\]+\.zip)(?:[?#].*)?$", text, re.IGNORECASE)
         if match:
-            return match.group(1)
+            return unquote(match.group(1)).strip()
         parsed = urlparse(text)
-        return os.path.basename(parsed.path)
+        filename = os.path.basename(unquote(parsed.path or text))
+        return filename.strip() if filename.lower().endswith(".zip") else ""
+
+    def find_zip_source_url_in_row(self, row):
+        """Find the FTP/HTTP/local ZIP source value for one source Excel row.
+
+        Normal mapping should read 升级包地址, but some files name the column 整包地址
+        or other variants.  This fallback scans every original cell in that row so the
+        generated 升级文件地址 can always include the exact ZIP filename.
+        """
+        candidates = [
+            self.get_value(row, "升级包地址"),
+            self.get_value(row, "升级文件地址"),
+            self.get_value(row, "整包地址"),
+        ]
+        candidates.extend(row.get("_all_cell_values", []) or [])
+        for value in candidates:
+            text = str(value or "").strip()
+            if text and ".zip" in text.lower():
+                filename = self.extract_zip_filename(text)
+                if filename:
+                    return text
+        return ""
 
     def normalize_path_part(self, path):
         if not path:
@@ -859,6 +1121,26 @@ class OTATemplateApp:
     def get_value(self, row, field):
         return row.get(field, "")
 
+    def format_mapping_for_log(self, mapping):
+        if not mapping:
+            return "未识别到任何字段"
+        return ", ".join([f"{field}->{get_column_letter(col_idx)}" for field, col_idx in sorted(mapping.items(), key=lambda x: x[1])])
+
+    def log_required_field_status(self, mapping):
+        required_fields = ["源版本", "目标版本", "OTA类型", "升级包地址", "升级文件的MD5值", "文件大小"]
+        self.log_message("关键字段检查：")
+        for field in required_fields:
+            if field in mapping:
+                self.log_message(f"  ✓ 已识别：{field} -> {get_column_letter(mapping[field])}列")
+            else:
+                self.log_message(f"  ⚠ 未识别：{field}。生成时该字段将留空或使用默认规则。")
+        if "区域" in mapping:
+            self.log_message(f"  ✓ 已识别：区域 -> {get_column_letter(mapping['区域'])}列，将复制到输出文件的“区域组”。")
+        else:
+            self.log_message("  ⚠ 未识别：区域。输出文件“区域组”将留空。")
+        if "MAC" in mapping:
+            self.log_message(f"  说明：已检测到 Source Excel 的 MAC 列 {get_column_letter(mapping['MAC'])}，但按照规则不会复制；输出 MAC组只使用 UI 输入。")
+
     # ==========================================================
     # Workbook
     # ==========================================================
@@ -908,6 +1190,39 @@ class OTATemplateApp:
                 cell.border = border
 
         ws.freeze_panes = "A2"
+
+        # ===============================
+        # OTA升级提示语 Sheet
+        # ===============================
+        msg_ws = wb.create_sheet("升级提示语")
+
+        msg_headers = ["语种", "描述"]
+        for col_idx, header in enumerate(msg_headers, start=1):
+            cell = msg_ws.cell(row=1, column=col_idx, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = border
+
+        ota_messages = [
+            ["简体中文", "有新软件版本可用。更新包括：\n-改善用户体验\n-其他一些小问题\n\n请更新电视软件以改善用户体验。\n软件升级时，请勿断电。"],
+            ["法语", "Une nouvelle version du logiciel est disponible. Les mises à jour incluent :\n-Améliorer l’expérience utilisateur\n- Quelques corrections mineures\n\nVeuillez mettre à jour le logiciel du téléviseur pour améliorer votre expérience utilisateur.\nNe coupez pas l’alimentation lors de la mise à niveau du logiciel."],
+            ["西班牙语", "Una nueva versión de software está disponible. Las actualizaciones incluyen:\n-Mejorar la experiencia del usuario\n-Algunas otras correcciones menores\n\nActualice el software de TV para mejorar su experiencia de usuario.\nCuando el S/W se está actualizando, NO apague la alimentación."],
+            ["繁体中文", "有新軟體版本可用。更新包括：\n-改善用戶體驗\n-其他一些小問題\n\n請更新電視軟體以改善用戶體驗。\n軟體升級時，請勿斷電。"],
+            ["德语", "Eine neue Softwareversion ist verfügbar. Aktualisierungen umfassen:\n- Verbesserung des Nutzungserlebnisses\n- weitere Bugfixes\n\nBitte aktualisieren Sie die TV-Software, um Ihre Benutzererfahrung zu verbessern.\nSchalten Sie die Stromversorgung NICHT aus, wenn die Software aktualisiert wird."],
+            ["葡萄牙语", "Está disponível uma atualização de software importante.\nO que há de novo?\n-Correções de bugs de software\n-Melhorias de plataforma\n\nA alimentação tem de estar sempre ligada até à conclusão da atualização."]
+        ]
+
+        for row_idx, row in enumerate(ota_messages, start=2):
+            for col_idx, value in enumerate(row, start=1):
+                cell = msg_ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+        msg_ws.column_dimensions["A"].width = 20
+        msg_ws.column_dimensions["B"].width = 120
+
+
         for col_idx, header in enumerate(OUTPUT_HEADERS, start=1):
             max_len = len(header)
             for row_idx in range(2, ws.max_row + 1):
@@ -939,9 +1254,19 @@ class OTATemplateApp:
         self.download_status_var.set("下载进度：0%")
 
         source_file_path = self.source_file_var.get().strip()
+        self.log_message(f"Source Excel 路径：{source_file_path}")
         self.validate_inputs(source_file_path)
+        self.log_message("输入文件校验通过。")
         self.update_aws_suffix_from_device_code()
+        self.log_message(f"设备类型代码：{self.device_code_var.get().strip() or '(空)'}")
+        self.log_message(f"设备类型名称：{self.device_name_var.get().strip() or '(空)'}")
+        self.log_message(f"Feature Code / 特征码：{self.feature_code_var.get().strip() or '(空)'}")
+        self.log_message(f"MAC 地址组：{self.mac_group_var.get().strip() or '(空)'}")
+        self.log_message(f"AWS 下载地址前缀：{AWS_PREFIX}")
+        self.log_message(f"AWS 文件路径后缀：{self.aws_suffix_var.get().strip()}")
+        self.log_message(f"AWS UI 完整显示路径：{self.aws_full_location_var.get().strip()}")
         self.save_config()
+        self.log_message(f"配置已保存：{CONFIG_FILE}")
         self.disable_all_buttons()
         self.start_animation(animation_text)
         return source_file_path
@@ -995,11 +1320,17 @@ class OTATemplateApp:
 
     def check_aws_cli_ready(self):
         try:
-            if shutil.which("aws") is None:
+            aws_path = shutil.which("aws")
+            if aws_path is None:
                 self.thread_log("AWS CLI is not installed or not found in PATH.")
                 self.thread_log("请先安装 AWS CLI，并确认 Terminal 中可以执行：aws --version")
                 return False
 
+            self.thread_log(f"AWS CLI 路径：{aws_path}")
+            version_result = subprocess.run(["aws", "--version"], capture_output=True, text=True, timeout=20)
+            version_text = (version_result.stdout or version_result.stderr).strip()
+            if version_text:
+                self.thread_log(f"AWS CLI 版本：{version_text}")
             result = subprocess.run(["aws", "sts", "get-caller-identity"], capture_output=True, text=True, timeout=20)
             if result.returncode == 0:
                 self.thread_log("AWS CLI is configured and ready.")
@@ -1131,8 +1462,12 @@ class OTATemplateApp:
 
             self.log_message("按钮：自动执行" if start_zip_after else "按钮：生成模版文件")
             self.log_message("开始生成 OTA 部署文件...")
+            self.log_message(f"输出文件将保存到 Source Excel 同级目录：{os.path.dirname(source_file_path)}")
 
-            rows, _ = self.read_source_excel(source_file_path, use_gui_log=True)
+            rows, mapping = self.read_source_excel(source_file_path, use_gui_log=True)
+            self.log_message(f"是否检测到“版本变化”列：{'是' if '版本变化' in mapping else '否'}")
+            self.log_message(f"是否检测到“区域”列：{'是，将复制到输出“区域组”' if '区域' in mapping else '否，输出“区域组”将留空'}")
+            self.log_message(f"是否检测到 Source Excel 的 MAC 列：{'是，但不会复制' if 'MAC' in mapping else '否'}")
             output_rows = []
             auto_target_version_count = 0
 
@@ -1141,7 +1476,9 @@ class OTATemplateApp:
                 full_target_version = self.get_value(row, "目标版本")
                 version_change = self.get_value(row, "版本变化")
                 ota_type_raw = self.get_value(row, "OTA类型")
-                source_upgrade_url = self.get_value(row, "升级包地址")
+                mapped_upgrade_url = self.get_value(row, "升级包地址")
+                source_upgrade_url = self.find_zip_source_url_in_row(row)
+                region_group = self.get_value(row, "区域")
 
                 target_version, auto_generated = self.build_target_version(source_version, full_target_version, version_change)
                 if auto_generated:
@@ -1149,6 +1486,8 @@ class OTATemplateApp:
 
                 ota_type = self.map_ota_type(ota_type_raw)
                 upgrade_url, zip_filename = self.build_upgrade_url(source_upgrade_url, aws_suffix)
+                if not zip_filename:
+                    self.log_message(f"  ⚠ 第 {index} 行未能识别 ZIP 文件名；请检查源 Excel 是否包含 整包地址/升级包地址 且值以 .zip 结尾。")
 
                 output_rows.append({
                     "设备类型代码": device_code,
@@ -1161,7 +1500,7 @@ class OTATemplateApp:
                     "目标完整版本": full_target_version,
                     "目标版本": target_version,
                     "品牌组": self.get_value(row, "品牌"),
-                    "区域组": "",
+                    "区域组": region_group,
                     "MAC组": mac_group,
                     "定向组": "",
                     "升级文件地址": upgrade_url,
@@ -1173,9 +1512,23 @@ class OTATemplateApp:
 
                 self.log_message("")
                 self.log_message(f"第 {index} 行")
+                self.log_message(f"  源 Excel 行号：{row.get('_row_number', '')}")
+                self.log_message(f"  内部机型信息：{self.get_value(row, '机型信息')}")
+                self.log_message(f"  设备扩展信息：{self.get_value(row, '机器扩展码')}")
                 self.log_message(f"  OTA类型：{ota_type_raw} -> {ota_type}")
-                self.log_message(f"  升级文件地址：{upgrade_url}")
+                self.log_message(f"  源版本：{source_version}")
+                self.log_message(f"  目标完整版本：{full_target_version}")
+                self.log_message(f"  目标版本：{target_version} {'(自动生成)' if auto_generated else '(来自版本变化列)'}")
+                self.log_message(f"  品牌组：{self.get_value(row, '品牌')}")
+                self.log_message(f"  区域组：{region_group}")
+                self.log_message(f"  MAC组：{mac_group}（只使用 UI 输入，不复制 Source Excel MAC 列）")
+                self.log_message(f"  Source 映射升级包地址：{mapped_upgrade_url}")
+                self.log_message(f"  Source 实际 ZIP 地址/路径：{source_upgrade_url}")
                 self.log_message(f"  ZIP 文件：{zip_filename}")
+                self.log_message(f"  升级文件地址：{upgrade_url}")
+                self.log_message(f"  MD5：{self.get_value(row, '升级文件的MD5值')}")
+                self.log_message(f"  文件大小：{self.clean_file_size(self.get_value(row, '文件大小'))}")
+                self.log_message(f"  SHA256：{self.get_value(row, 'SHA256')}")
                 self.validate_output_row(index, output_rows[-1])
 
             output_path = self.generate_output_path(source_file_path, device_code, len(output_rows))
@@ -1186,6 +1539,7 @@ class OTATemplateApp:
             self.log_message("========== 生成结果 ==========")
             self.log_message(f"生成表格行数：{len(output_rows)}")
             self.log_message(f"自动生成目标版本行数：{auto_target_version_count}")
+            self.log_message(f"区域组复制状态：已从 Source Excel 的“区域”字段复制到输出“区域组”（如源文件未识别该列则为空）。")
             self.log_message(f"输出文件路径：{output_path}")
             self.log_message("模版文件生成成功。")
 
