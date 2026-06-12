@@ -526,7 +526,7 @@ class OTATemplateApp:
                     col_scores["机器扩展码"] += 1
                 if self.looks_like_extension(text):
                     col_scores["机器扩展码"] += 3
-                if text in ["正常升级", "强制升级", "FTE强制升级"]:
+                if text in ["正常升级", "强制升级", "非强制升级", "FTE强制升级"]:
                     col_scores["OTA类型"] += 5
                 if self.looks_like_version(text):
                     col_scores["源版本"] += 2
@@ -992,8 +992,12 @@ class OTATemplateApp:
             return prefix_match.group(1)
 
         # Text values. Check FTE before generic 强制, otherwise FTE强制升级 would map to 2.
+        # Check 非强制升级 before generic 强制, otherwise the substring 强制 inside it
+        # would cause a wrong match — 非强制升级 means normal upgrade and must map to 1.
         if "fte" in lowered and "强制" in normalized_no_space:
             return "11"
+        if "非强制" in normalized_no_space:
+            return "1"
         if "强制" in normalized_no_space:
             return "2"
         if "正常" in normalized_no_space:
